@@ -12,8 +12,6 @@ def set_default(base):
 
     iraf.datapars.setParam('datamin','INDEF')
     iraf.datapars.setParam('datamax','50000')
-    #iraf.datapars.setParam('readnoise','RDNOISE')
-    #iraf.datapars.setParam('epadu','GAIN')
     iraf.datapars.setParam('exposure','EXPTIME')
     iraf.datapars.setParam('airmass', 'AIRMASS')
     iraf.datapars.setParam('filter', 'FILTER')
@@ -23,8 +21,6 @@ def set_default(base):
     iraf.findpars.setParam('roundhi', 1.3)
     iraf.findpars.setParam('roundlo', -1.3)
 
-    iraf.daofind.setParam('verify','no')
-    iraf.daofind.setParam('interactive','no')
     iraf.daofind.setParam('verify','no')
     iraf.daofind.setParam('interactive','no')
 

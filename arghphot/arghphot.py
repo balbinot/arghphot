@@ -1,12 +1,15 @@
 #!/usr/bin/env python
 #-*- coding: utf-8 -*-
 
+## temp imports
+
+from matplotlib import pyplot as p
+
 import numpy as np
 from astropy.io import fits
 from astropy import units as u
 from astropy import wcs
 from pyraf import iraf
-
 
 # Logger
 from logutil import *
@@ -32,6 +35,7 @@ class Frame(mylogger):
         self.sdict={}
         self.log = mylogger(self.sdict, logfn)
         self.fname = fname
+        self.pfname = fname.split('/')[-1]
         self.iname = "%s[%i]" % (fname, ext)
         self.ext = ext
         self.read_fits(fname, ext)
@@ -41,6 +45,11 @@ class Frame(mylogger):
         # Change with fwhm estimator routine. Bellow for processed DECAM data
         self.fwhm = self.hdup.header['FWHMAV']
         self.fwhmph = self.hdup.header['FWHMAV']*(3600*self.hdup.header['CDELT2'])
+
+        ## Utility names
+        self.daofindfn = '%s%d.coo.1' % (self.pfname, ext)
+        self.photfn = '%s%d.mag.1' % (self.pfname, ext)
+        self.fitpsffn = self.pfname.replace('.fits', '.fitpsf')
 
     def pix2sky(self, x, y):
         return self.wcs.wcs_pix2world(np.array([x,y]).T, 1)
@@ -57,10 +66,9 @@ class Frame(mylogger):
         self.log(1, 'WCS READ', 1, 'Reading WCS for %s[%i]' % (self.fname, self.ext))
         self.wcs = wcs.WCS(self.hdu.header)
 
-    def findsky(self, scl, nwin):
+    def findsky(self, scl, nwin, rerun=False):
         """
         Find sky statistics at random windows.
-
         Window size set by scl (square) and number of windows by nwin
         """
 
@@ -69,7 +77,6 @@ class Frame(mylogger):
         s = scl*0.5
         xsize = a.shape[1]
         ysize = a.shape[1]
-
         b = np.empty((nwin,4))
         for i in xrange(nwin):
             x = y = -10
@@ -92,7 +99,6 @@ class Frame(mylogger):
         iraf.fitskypars.setParam('skyvalu', sky)
 
     def run_daofind(self):
-        self.findsky(10, 1000)
         iraf.daofind.setParam('image',self.iname)
         iraf.datapars.setParam('fwhmpsf',self.fwhm)
         iraf.daofind.setParam('output',self.base+'default')
@@ -104,18 +110,67 @@ class Frame(mylogger):
         iraf.fitskypars.setParam('annulus',4.*self.fwhm)
         iraf.fitskypars.setParam('dannulus',2.*self.fwhm)
         iraf.phot(mode='h',Stdout=1)
-        iraf.fitpsf.setParam('output',base+'default')
-        iraf.fitpsf.setParam('coords',base+'default')
+
+    def run_fitpsf(self):
+
+        # select some guess stars for PSF building
+        # Based on median magnitude from apperture phot
+        daofind = np.loadtxt(self.daofindfn)
+        i = (daofind[:,2] < np.median(daofind[:,2]) + 0.12)&(daofind[:,2] > np.median(daofind[:,2]) - 0.12)
+        np.savetxt(self.base+self.pfname+'.guess.coo', daofind[i,0:2],
+                   fmt=['%-10.3f','%-10.3f'])
+
+        iraf.fitpsf.setParam('image', self.iname)
+        iraf.fitpsf.setParam('output',self.pfname.replace('.fits', '.fitpsf')) # preliminary psf fit
+        iraf.fitpsf.setParam('coords', self.base+self.pfname+'.guess.coo')
         iraf.fitpsf(mode='h',Stdout=1)
+
+    def merge(self):
+        iraf.txdump(textfile=self.photfn,
+                    fields='xcenter,ycenter,mag,msky,merr,id',
+                    expr='mag!=INDEF && merr!=INDEF',
+                    Stdout=self.base+'phottmp')
+        mags = np.loadtxt(self.base+'phottmp')
+
+        iraf.txdump(textfile=self.daofindfn,
+                    fields='sharpness,sround,ground,id',
+                    expr='sharpness!=INDEF && sround!=INDEF && ground!=INDEF',
+                    Stdout=self.base+'daofindtmp')
+        daofind = np.loadtxt(self.base+'daofindtmp')
+
+        iraf.txdump(textfile=self.fitpsffn,
+                    fields='rsigma,id',
+                    expr='rsigma!=INDEF && rsigma < 7.0',
+                    Stdout=self.base+'fitpsftmp')
+        fitpsf = np.loadtxt(self.base+'fitpsftmp')
+
+
+        I = reduce(lambda l,r: np.intersect1d(l,r,True), (i[:,-1] for i in
+                                                          (daofind, mags,
+                                                           fitpsf)))
+
+
+        oo = np.c_[daofind[np.searchsorted(daofind[:,-1], I)],
+                  mags[np.searchsorted(mags[:,-1], I)],
+                  fitpsf[np.searchsorted(fitpsf[:,-1], I)]]
+
+        return oo
+
 
 
 if __name__=='__main__':
     fname = "/scratch/gc_survey/raw_data/c4d_150715_013102_osi_g_v1.fits"
     tmp = Frame(fname, 2, 'bunda.log')
     t = tmp.pix2sky(np.random.rand(10)*1000, np.random.rand(10)*1000)
-    tmp.run_daofind()
-    tmp.run_phot()
+    tmp.findsky(10, 1000)
+    #tmp.run_daofind()
+    #tmp.run_phot()
+    #tmp.run_fitpsf()
 
+    f = tmp.merge()
+    print f[0]
 
-    print tmp.sdict
+    p.plot(f[:,0], f[:,1], 'k.', ms=1)
+    p.show()
+
 

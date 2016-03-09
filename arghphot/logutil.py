@@ -1,13 +1,14 @@
 import logging
 import colorlog
 from logging.config import fileConfig
-
+import json
 
 class mylogger():
     def __init__(self, sdict, logfn):
         fileConfig('./logging_config.ini', defaults={'logfilename': logfn})
         self.logger = logging.getLogger()
         self.sdict = sdict
+        #save or open from json file
 
     def __call__(self, type, key, value, msg):
         if key:
