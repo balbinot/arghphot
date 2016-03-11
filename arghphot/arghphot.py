@@ -4,6 +4,7 @@
 ## temp imports
 
 from matplotlib import pyplot as p
+from matplotlib import cm
 
 import numpy as np
 from astropy.io import fits, ascii
@@ -53,6 +54,9 @@ class Frame(mylogger):
         self.photfn = '%s%d.mag.1' % (self.pfname, ext)
         self.pstfile = '%s%d.pst.1' % (self.pfname, ext)
         self.fitpsffn = self.pfname.replace('.fits', '.fitpsf')
+        self.psfgridname = '%s%d.psfgrid.png' % (self.pfname, ext)
+        self.psf = '%s%d.psf.1.fits' % (self.pfname, ext)
+        self.psfimg = '%s%d.psf.1.img.fits' % (self.pfname, ext)
 
     def pix2sky(self, x, y):
         return self.wcs.wcs_pix2world(np.array([x,y]).T, 1)
@@ -217,29 +221,54 @@ class Frame(mylogger):
     def grid_psf(self):
         from mpl_toolkits.axes_grid1 import ImageGrid
         id, x, y = np.loadtxt(self.pstfile, usecols=(0,1,2), unpack=True)
-
-
-        grid1 = ImageGrid(fig, 111,
-                nrows_ncols = (2, 4),
-                axes_pad = 0.07,
-                share_all=True,
-                label_mode = "L",
-                cbar_location = "right",
-                cbar_mode="single",
-                cbar_size="7%",
-                cbar_pad="7%",
-                aspect = True
+        side = int(np.ceil(np.sqrt(len(x))))
+        rad = int(6*self.fwhm)
+        fig = p.figure(figsize=(12,12))
+        grid =  ImageGrid(fig, 111,
+                          nrows_ncols = (side, side),
+                          axes_pad = 0.0,
+                          share_all=True,
+                          label_mode = "L",
+                          cbar_location = "right",
+                          cbar_mode=None,
+#                          cbar_size="5%",
+#                          cbar_pad="5%",
+                          aspect = True
                 )
 
+        for i in np.arange(len(x)):
+            xbox = int(x[i] - rad)
+            Xbox = int(x[i] + rad)
+            ybox = int(y[i] - rad)
+            Ybox = int(y[i] + rad)
+            block = self.hdu.data[ybox:Ybox,xbox:Xbox]
+            grid[i].imshow(block.T, origin='lower', cmap=cm.gray,
+                           vmin=self.sky-5*self.sigma, vmax=300,
+                           interpolation='nearest')
 
-        xbox = int(f[i,0] - rad)
-        Xbox = int(f[i,0] + rad)
-        ybox = int(f[i,1] - rad)
-        Ybox = int(f[i,1] + rad)
-        block = img[xbox:Xbox,ybox:Ybox]
+        p.savefig(self.psfgridname)
 
+    def run_psf(self):
+        fwhm = self.fwhm
+        iraf.daopars.setParam('matchra',fwhm)
+        iraf.daopars.setParam('psfrad',4*fwhm+1)
+        iraf.daopars.setParam('fitrad',fwhm)
+        iraf.daopars.setParam('sannulu',2*fwhm)
+        iraf.daopars.setParam('wsannul',4*fwhm)
+        iraf.psf.setParam('image',self.iname)
+        iraf.psf(mode='h')
+        iraf.seepsf(psfimage=self.base+self.psf, image=self.base+self.psfimg,
+                    magnitu='18.0')
 
-
+    def run_allstar(self):
+        fwhm = self.fwhm
+        iraf.daopars.setParam('matchra',fwhm)
+        iraf.daopars.setParam('psfrad',4*fwhm+1)
+        iraf.daopars.setParam('fitrad',fwhm)
+        iraf.daopars.setParam('sannulu',2*fwhm)
+        iraf.daopars.setParam('wsannul',4*fwhm)
+        iraf.allstar.setParam('image',self.iname)
+        iraf.allstar(mode='h',verbose='no')
 
 
 if __name__=='__main__':
@@ -248,14 +277,16 @@ if __name__=='__main__':
     tmp.findsky(10, 1000)
     #tmp.run_daofind()
     #tmp.run_phot()
-    tmp.trim_phot()
+    #tmp.trim_phot()
     #tmp.run_fitpsf()
+    #f = tmp.select_psf()
+    #tmp.grid_psf()
+    #tmp.run_psf()
+    tmp.run_allstar()
 
-    f = tmp.select_psf()
+    #t = tmp.pix2sky(f[1], f[2])
+    #tmp.tvmark(t[:,0], t[:,1])
 
-    t = tmp.pix2sky(f[1], f[2])
-    tmp.tvmark(t[:,0], t[:,1])
-
-    p.show()
+    #p.show()
 
 
