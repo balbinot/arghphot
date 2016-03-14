@@ -6,6 +6,8 @@
 from matplotlib import pyplot as p
 from matplotlib import cm
 
+import tempfile
+
 import numpy as np
 from astropy.io import fits, ascii
 from astropy.coordinates import SkyCoord
@@ -24,10 +26,10 @@ iraf.daophot(_doprint=0)
 iraf.apphot(_doprint=0)
 iraf.reset(min_lenuserarea='200000')
 
-__all__ = []
+__all__ = ['Frame']
 
 class Frame(mylogger):
-    def __init__(self, fname, ext, logfn='last.log'):
+    def __init__(self, fname, ext, mask, logfn='last.log'):
 
         ## Initialize DAOPHOT
         self.base = './'
@@ -41,7 +43,10 @@ class Frame(mylogger):
         self.pfname = fname.split('/')[-1]
         self.iname = "%s[%i]" % (fname, ext)
         self.ext = ext
-        self.read_fits(fname, ext)
+
+        # Read image and maks
+        self.hdu = self.read_fits(fname, ext)
+        self.mask = self.read_fits(mask, ext)
         self.read_prim(fname)  # Some infos are only found in the primary HDU
         self.read_wcs()
 
@@ -53,17 +58,19 @@ class Frame(mylogger):
         self.daofindfn = '%s%d.coo.1' % (self.pfname, ext)
         self.photfn = '%s%d.mag.1' % (self.pfname, ext)
         self.pstfile = '%s%d.pst.1' % (self.pfname, ext)
-        self.fitpsffn = self.pfname.replace('.fits', '.fitpsf')
+        self.fitpsffn = '%s%d.fitpsf.1' % (self.pfname, ext)
+        self.guess = '%s%d.guess.1' % (self.pfname, ext)
         self.psfgridname = '%s%d.psfgrid.png' % (self.pfname, ext)
         self.psf = '%s%d.psf.1.fits' % (self.pfname, ext)
         self.psfimg = '%s%d.psf.1.img.fits' % (self.pfname, ext)
+        self.psfselectplot = '%s%d.psfselect.png' % (self.pfname, ext)
 
     def pix2sky(self, x, y):
         return self.wcs.wcs_pix2world(np.array([x,y]).T, 1)
 
     def read_fits(self, fname, ext):
         self.log(1, 'READ', 1, 'Reading %s[%i]' % (fname, ext))
-        self.hdu = fits.open(fname, memmap=True)[ext]
+        return fits.open(fname, memmap=True)[ext]
 
     def read_prim(self, fname):
         self.log(1, 'READP', 1, 'Reading %s header' % (fname))
@@ -80,6 +87,7 @@ class Frame(mylogger):
         """
 
         a = self.hdu.data
+        m = self.mask.data
         avoid = 100*scl
         s = scl*0.5
         xsize = a.shape[1]
@@ -91,13 +99,20 @@ class Frame(mylogger):
                 x = 1 + int(np.random.rand()*xsize)
                 y = 1 + int(np.random.rand()*ysize)
             tmp = a[y-s:y+s, x-s:x+s]
-            b[i,0] = np.sum(tmp)/(scl*scl)
-            b[i,1] = np.mean(tmp)
-            b[i,2] = np.median(tmp)
-            b[i,3] = np.std(tmp)
+            tmpm = m[y-s:y+s, x-s:x+s]
+            if np.any(tmpm < 1):
+                b[i,0] = np.nan
+                b[i,1] = np.nan
+                b[i,2] = np.nan
+                b[i,3] = np.nan
+            else:
+                b[i,0] = np.sum(tmp)/(scl*scl)
+                b[i,1] = np.mean(tmp)
+                b[i,2] = np.median(tmp)
+                b[i,3] = np.std(tmp)
 
-        sigma = np.median(b[:,3])
-        sky = np.median(b[:,0])
+        sigma = np.nanmedian(b[:,3])
+        sky = np.nanmedian(b[:,0])
         self.sigma = sigma
         self.sky = sky
         self.log(1, 'SKY', sky, 'Sky value median: %lf' % sky)
@@ -116,6 +131,7 @@ class Frame(mylogger):
         iraf.fitskypars.setParam('skyvalue',self.sky)
         iraf.fitskypars.setParam('annulus',4.*self.fwhm)
         iraf.fitskypars.setParam('dannulus',2.*self.fwhm)
+        iraf.photpars.setParam('zmag', self.hdup.header['MAGZERO']) # Use DECAM estimate of zeropoint
         iraf.phot(mode='h',Stdout=1)
 
     def trim_phot(self):
@@ -132,33 +148,41 @@ class Frame(mylogger):
 
         # select some guess stars for PSF building
         # Based on median magnitude from apperture phot
-        daofind = np.loadtxt(self.daofindfn)
+        daofind = np.loadtxt(self.daofindfn, usecols=(0,1,2))
         i = (daofind[:,2] < np.median(daofind[:,2]) + 0.12)&(daofind[:,2] > np.median(daofind[:,2]) - 0.12)
-        np.savetxt(self.base+self.pfname+'.guess.coo', daofind[i,0:2],
+        np.savetxt(self.base+self.guess, daofind[i,0:2],
                    fmt=['%-10.3f','%-10.3f'])
 
         iraf.fitpsf.setParam('image', self.iname)
-        iraf.fitpsf.setParam('output',self.pfname.replace('.fits', '.fitpsf')) # preliminary psf fit
-        iraf.fitpsf.setParam('coords', self.base+self.pfname+'.guess.coo')
+        iraf.fitpsf.setParam('output', self.base+self.fitpsffn) # preliminary psf fit
+        iraf.fitpsf.setParam('coords', self.base+self.guess)
         iraf.fitpsf(mode='h',Stdout=1)
 
     def merge(self):
         ## Use trimmed photometry to avoid variable sky background spurious
         ## detections
         # x,y, msky, stdev, sum, area, mag, merr, id
-        mags = np.loadtxt(self.photfn+'trim', usecols=(6,7,14,15,26,27,29,30,3), skiprows=1)
+#        mags = np.loadtxt(self.photfn+'trim', usecols=(6,7,14,15,26,27,29,30,3), skiprows=1)
+        mags = np.genfromtxt(self.photfn+'trim', usecols=(6,7,14,15,26,27,29,30,3), skip_header=1, dtype='|S5')
+        j = True
+        for i in np.arange(mags.shape[1]):
+            j *= (mags[:,i] != '--')
+        mags = mags[j]
+        mags = mags.astype(np.float64)
 
+        tf = tempfile.NamedTemporaryFile(dir=self.base)
         iraf.txdump(textfile=self.daofindfn,
                     fields='sharpness,sround,ground,id',
                     expr='sharpness!=INDEF && sround!=INDEF && ground!=INDEF',
-                    Stdout=self.base+'daofindtmp')
-        daofind = np.loadtxt(self.base+'daofindtmp')
+                    Stdout=tf.name+'coo')
+        daofind = np.loadtxt(tf.name+'coo')
 
+        tf = tempfile.NamedTemporaryFile(dir=self.base)
         iraf.txdump(textfile=self.fitpsffn,
                     fields='rsigma,id',
                     expr='rsigma!=INDEF && rsigma < 7.0',
-                    Stdout=self.base+'fitpsftmp')
-        fitpsf = np.loadtxt(self.base+'fitpsftmp')
+                    Stdout=tf.name+'psf')
+        fitpsf = np.loadtxt(tf.name+'psf')
 
         ## I have no idea how this works
         I = reduce(lambda l,r: np.intersect1d(l,r,True), (i[:,-1] for i in
@@ -185,18 +209,67 @@ class Frame(mylogger):
         sharp = f[:,9]
         fwhm = f[:,13]
 
+        self.maglim = np.mean(mag) -1.2
+        self.merrlim = 0.08
+        self.sharplim = 0.04
+        self.fwhmlimup = 1.15*self.fwhm/2.355
+        self.fwhmlimlow = 0.8*self.fwhm/2.355
+
+        p.figure(figsize=(12,12))
+        p.subplot(331)
+        p.xlabel('mag')
+        p.hist(mag, range=[12,32], bins=30, color='k', alpha=0.6)
+        p.axvline(x=self.maglim, c='k')
+        p.subplot(332)
+        p.xlabel('merr')
+        p.hist(merr, range=[0,0.5], bins=30, color='k', alpha=0.6)
+        p.axvline(x=self.merrlim, c='k')
+        p.subplot(333)
+        p.xlabel('sharpness')
+        p.hist(sharp, range=[-0.5,0.5], bins=30, color='k', alpha=0.6)
+        p.axvline(x=np.median(sharp), c='k')
+        p.axvline(x=np.median(sharp)+self.sharplim, ls='--', c='k')
+        p.axvline(x=np.median(sharp)-self.sharplim, ls='--', c='k')
+        p.subplot(334)
+        p.xlabel('fwhm [px]')
+        p.hist(fwhm, range=[1,10], bins=30, color='k', alpha=0.6)
+        p.axvline(x=self.fwhmlimup, ls='--', c='k')
+        p.axvline(x=self.fwhmlimlow, ls='--', c='k')
+        p.subplot(335)
+        p.xlabel('separation [arcsec]')
+        p.hist(nsep.arcsec, bins=30, color='k', alpha=0.6)
+        p.axvline(x=12*self.fwhmph, ls='--', c='k')
+        p.subplot(336)
+        p.xlabel('sky std [counts]')
+        p.hist(skystd, bins=30, color='k', alpha=0.6)
+        p.axvline(x=np.median(skystd) - np.std(skystd), ls='--', c='k')
+        p.axvline(x=np.median(skystd) + np.std(skystd), ls='--', c='k')
+        p.axvline(x=np.median(skystd), ls='-', c='k')
+        p.subplot(337)
+        p.xlabel('sky [counts]')
+        p.hist(sky, range=[40,90], bins=30, color='k', alpha=0.6)
+        p.axvline(x=np.mean(sky) - np.std(sky), ls='--', c='k')
+        p.axvline(x=np.mean(sky) + np.std(sky), ls='--', c='k')
+        p.axvline(x=np.mean(sky), ls='-', c='k')
+        p.savefig(self.psfselectplot)
+
         ## Set of constrains for PSF stars
-        i = (mag < np.mean(mag) - 1.2*np.std(mag))
-        i *= (merr < 0.02)
-        i *= (np.abs(sharp-np.median(sharp)) < 0.04)
-        i *= (fwhm < 1.05*tmp.fwhm/2.355)
-        i *= (fwhm > 0.8*tmp.fwhm/2.355)
-        i *= (nsep.arcsec > 15*tmp.fwhmph)
-        i *= (x > 60*tmp.fwhm)*(y > 60*tmp.fwhm)
-        i *= (x < tmp.hdu.data.shape[1] - 60*tmp.fwhm)
-        i *= (y < tmp.hdu.data.shape[0] - 60*tmp.fwhm)
-        i *= (np.abs(skystd - np.mean(skystd)) < np.std(skystd))
-        i *= (sky - np.mean(sky) < np.std(sky))
+        i = (mag < self.maglim)  # works if zeropoint guess was ok
+        i *= (merr < self.merrlim)
+        i *= (np.abs(sharp-np.median(sharp)) < self.sharplim)
+        i *= (fwhm < self.fwhmlimup)
+        i *= (fwhm > self.fwhmlimlow)
+        i *= (nsep.arcsec > 12*self.fwhmph)
+        i *= (x > 60*self.fwhm)*(y > 60*self.fwhm)
+        i *= (x < self.hdu.data.shape[1] - 60*self.fwhm)
+        i *= (y < self.hdu.data.shape[0] - 60*self.fwhm)
+        i *= (np.abs(skystd - np.median(skystd)) < np.std(skystd))
+        i *= (np.abs(sky - np.mean(sky)) < np.std(sky))
+
+        if len(id[i]) <= 2:
+            self.log(3, 'NPSF', len(id[i]), 'Number of PSF stars less than 2')
+        else:
+            self.log(1, 'NPSF', len(id[i]), 'Number of PSF stars is %i' % len(id[i]))
 
         self._parse_pst(id[i], x[i], y[i], mag[i], sky[i])
         return (id[i], x[i], y[i], mag[i], sky[i])
