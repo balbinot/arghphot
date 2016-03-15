@@ -120,13 +120,27 @@ class Frame(mylogger):
         iraf.datapars.setParam('sigma', sigma)
         iraf.fitskypars.setParam('skyvalu', sky)
 
-    def run_daofind(self):
+    def run_daofind(self, coofn=False):
         iraf.daofind.setParam('image',self.iname)
         iraf.datapars.setParam('fwhmpsf',self.fwhm)
-        iraf.daofind.setParam('output',self.base+'default')
+        if coofn==False:
+            coofn = self.base+'default'
+        iraf.daofind.setParam('output', coofn)
         iraf.daofind(mode='h',Stdout=1)
 
-    def run_phot(self):
+        return coofn
+
+    def run_phot(self, coofn=False, outfn=False):
+        if coofn==False:
+            iraf.phot.setParam('coords',self.base+'default')
+        else:
+            iraf.phot.setParam('coords', coofn)
+
+        if outfn==False:
+            iraf.phot.setParam('output',self.base+'default')
+        else:
+            iraf.phot.setParam('output', outfn)
+
         iraf.phot.setParam('image',self.iname)
         iraf.fitskypars.setParam('skyvalue',self.sky)
         iraf.fitskypars.setParam('annulus',4.*self.fwhm)
@@ -134,15 +148,22 @@ class Frame(mylogger):
         iraf.photpars.setParam('zmag', self.hdup.header['MAGZERO']) # Use DECAM estimate of zeropoint
         iraf.phot(mode='h',Stdout=1)
 
-    def trim_phot(self):
-        a = ascii.read(self.photfn)
+    def trim_phot(self, infn=False, outfn=False):
+        if infn==False:
+            a = ascii.read(self.photfn)
+        else:
+            a = ascii.read(infn)
         std = a['STDEV']
         sum = a['SUM']/a['AREA']
         sky = a['MSKY']
         sn = np.abs(sum-sky)/std
         i = sn > 3
         tmp = a[i]
-        tmp.write(self.photfn+'trim', format='ascii')
+        if outfn==False:
+           outfn = self.photfn+'trim'
+        tmp.write(outfn, format='ascii')
+
+        return outfn, np.where(i)[0]
 
     def run_fitpsf(self):
 
@@ -259,7 +280,7 @@ class Frame(mylogger):
         i *= (np.abs(sharp-np.median(sharp)) < self.sharplim)
         i *= (fwhm < self.fwhmlimup)
         i *= (fwhm > self.fwhmlimlow)
-        i *= (nsep.arcsec > 12*self.fwhmph)
+        i *= (nsep.arcsec > 17*self.fwhmph)
         i *= (x > 60*self.fwhm)*(y > 60*self.fwhm)
         i *= (x < self.hdu.data.shape[1] - 60*self.fwhm)
         i *= (y < self.hdu.data.shape[0] - 60*self.fwhm)
