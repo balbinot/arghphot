@@ -28,6 +28,12 @@ iraf.reset(min_lenuserarea='200000')
 
 __all__ = ['Frame']
 
+def index_by_last_column_entry(M, keys):
+    colkeys = M[:,-1]
+    sorter = np.argsort(colkeys)
+    index = np.searchsorted(colkeys, keys, sorter = sorter)
+    return M[sorter[index]]
+
 class Frame(mylogger):
     def __init__(self, fname, ext, mask, logfn='last.log'):
 
@@ -54,9 +60,11 @@ class Frame(mylogger):
         self.fwhm = self.hdup.header['FWHMAV']
         self.fwhmph = self.hdup.header['FWHMAV']*(3600*self.hdup.header['CDELT2'])
 
+        self.high = 35000
+
         ## Utility names
         self.daofindfn = '%s%d.coo.1' % (self.pfname, ext)
-        self.photfn = '%s%d.mag.1' % (self.pfname, ext)
+        self.photfn = '%s%d.mag.2' % (self.pfname, ext)
         self.pstfile = '%s%d.pst.1' % (self.pfname, ext)
         self.fitpsffn = '%s%d.fitpsf.1' % (self.pfname, ext)
         self.guess = '%s%d.guess.1' % (self.pfname, ext)
@@ -120,26 +128,16 @@ class Frame(mylogger):
         iraf.datapars.setParam('sigma', sigma)
         iraf.fitskypars.setParam('skyvalu', sky)
 
-    def run_daofind(self, coofn=False):
+    def run_daofind(self, coofn):
         iraf.daofind.setParam('image',self.iname)
         iraf.datapars.setParam('fwhmpsf',self.fwhm)
-        if coofn==False:
-            coofn = self.base+'default'
         iraf.daofind.setParam('output', coofn)
         iraf.daofind(mode='h',Stdout=1)
-
         return coofn
 
-    def run_phot(self, coofn=False, outfn=False):
-        if coofn==False:
-            iraf.phot.setParam('coords',self.base+'default')
-        else:
-            iraf.phot.setParam('coords', coofn)
-
-        if outfn==False:
-            iraf.phot.setParam('output',self.base+'default')
-        else:
-            iraf.phot.setParam('output', outfn)
+    def run_phot(self, coofn, photfn):
+        iraf.phot.setParam('coords', coofn)
+        iraf.phot.setParam('output', photfn)
 
         iraf.phot.setParam('image',self.iname)
         iraf.fitskypars.setParam('skyvalue',self.sky)
@@ -148,43 +146,38 @@ class Frame(mylogger):
         iraf.photpars.setParam('zmag', self.hdup.header['MAGZERO']) # Use DECAM estimate of zeropoint
         iraf.phot(mode='h',Stdout=1)
 
-    def trim_phot(self, infn=False, outfn=False):
-        if infn==False:
-            a = ascii.read(self.photfn)
-        else:
-            a = ascii.read(infn)
+    def trim_phot(self, photfn, outfn):
+        a = ascii.read(photfn)
         std = a['STDEV']
         sum = a['SUM']/a['AREA']
         sky = a['MSKY']
         sn = np.abs(sum-sky)/std
         i = sn > 3
         tmp = a[i]
-        if outfn==False:
-           outfn = self.photfn+'trim'
         tmp.write(outfn, format='ascii')
-
         return outfn, np.where(i)[0]
 
-    def run_fitpsf(self):
+    def run_fitpsf(self, coofn, outfn, guessfn):
 
         # select some guess stars for PSF building
         # Based on median magnitude from apperture phot
-        daofind = np.loadtxt(self.daofindfn, usecols=(0,1,2))
+        daofind = np.loadtxt(coofn, usecols=(0,1,2))
         i = (daofind[:,2] < np.median(daofind[:,2]) + 0.12)&(daofind[:,2] > np.median(daofind[:,2]) - 0.12)
-        np.savetxt(self.base+self.guess, daofind[i,0:2],
-                   fmt=['%-10.3f','%-10.3f'])
+        np.savetxt(guessfn, daofind[i,0:2], fmt=['%-10.3f','%-10.3f'])
 
         iraf.fitpsf.setParam('image', self.iname)
-        iraf.fitpsf.setParam('output', self.base+self.fitpsffn) # preliminary psf fit
-        iraf.fitpsf.setParam('coords', self.base+self.guess)
+        iraf.fitpsf.setParam('output', outfn) # preliminary psf fit
+        iraf.fitpsf.setParam('coords', guessfn)
         iraf.fitpsf(mode='h',Stdout=1)
 
-    def merge(self):
+    def merge(self, trimphotfn, daofindfn, fitpsffn):
+
+        self.log(1, 'MERGED', '1', '%d Will merge %s, %s, %s by ID' % (self.ext, trimphotfn, daofindfn, fitpsffn))
         ## Use trimmed photometry to avoid variable sky background spurious
         ## detections
         # x,y, msky, stdev, sum, area, mag, merr, id
 #        mags = np.loadtxt(self.photfn+'trim', usecols=(6,7,14,15,26,27,29,30,3), skiprows=1)
-        mags = np.genfromtxt(self.photfn+'trim', usecols=(6,7,14,15,26,27,29,30,3), skip_header=1, dtype='|S5')
+        mags = np.genfromtxt(trimphotfn, usecols=(6,7,14,15,26,27,29,30,3), skip_header=1, dtype='|S5')
         j = True
         for i in np.arange(mags.shape[1]):
             j *= (mags[:,i] != '--')
@@ -192,34 +185,42 @@ class Frame(mylogger):
         mags = mags.astype(np.float64)
 
         tf = tempfile.NamedTemporaryFile(dir=self.base)
-        iraf.txdump(textfile=self.daofindfn,
+        iraf.txdump(textfile=daofindfn,
                     fields='sharpness,sround,ground,id',
                     expr='sharpness!=INDEF && sround!=INDEF && ground!=INDEF',
-                    Stdout=tf.name+'coo')
-        daofind = np.loadtxt(tf.name+'coo')
+                    Stdout=tf.name+'coo.meh')
+        daofind = np.loadtxt(tf.name+'coo.meh')
 
         tf = tempfile.NamedTemporaryFile(dir=self.base)
-        iraf.txdump(textfile=self.fitpsffn,
+        iraf.txdump(textfile=fitpsffn,
                     fields='rsigma,id',
                     expr='rsigma!=INDEF && rsigma < 7.0',
-                    Stdout=tf.name+'psf')
-        fitpsf = np.loadtxt(tf.name+'psf')
+                    Stdout=tf.name+'psf.meh')
+        fitpsf = np.loadtxt(tf.name+'psf.meh')
 
         ## I have no idea how this works
-        I = reduce(lambda l,r: np.intersect1d(l,r,True), (i[:,-1] for i in
+        I = reduce(lambda l,r: np.intersect1d(l,r,False), (i[:,-1] for i in
                                                           (mags, daofind,
                                                            fitpsf)))
+
+        mags = index_by_last_column_entry(mags, I)
+        fitpsf = index_by_last_column_entry(fitpsf, I)
+        daofind = index_by_last_column_entry(daofind, I)
+
         oo = np.c_[mags[np.searchsorted(mags[:,-1], I)],
                    daofind[np.searchsorted(daofind[:,-1], I)],
                    fitpsf[np.searchsorted(fitpsf[:,-1], I)]]
 
+        tf = 'joinedforpsf%s.%d.dat' % ('DEBUG', self.ext)
+        np.savetxt(tf, oo, fmt='%lf')
+
         return oo
 
-    def select_psf(self):
-        f = self.merge()
+    def select_psf(self, trimphotfn, coofn, fitpsffn, outfn):
+        f = self.merge(trimphotfn, coofn, fitpsffn)
         w = self.pix2sky(f[:,0], f[:,1])
         coo = SkyCoord(w[:,0]*u.deg, w[:,1]*u.deg)
-        nid, nsep, _ = coo.match_to_catalog_sky(coo, nthneighbor=2)
+        nid, nsep2, _ = coo.match_to_catalog_sky(coo, nthneighbor=2)
         x = f[:,0]
         y = f[:,1]
         id = f[:,-1]
@@ -230,11 +231,14 @@ class Frame(mylogger):
         sharp = f[:,9]
         fwhm = f[:,13]
 
-        self.maglim = np.mean(mag) -1.2
-        self.merrlim = 0.08
-        self.sharplim = 0.04
-        self.fwhmlimup = 1.15*self.fwhm/2.355
-        self.fwhmlimlow = 0.8*self.fwhm/2.355
+        self.maglim = np.mean(mag) - 0.4
+        self.merrlim = 0.1
+        self.sharplim = 0.06
+        #self.fwhmlimup = 1.15*self.fwhm/2.355
+        #self.fwhmlimlow = 0.55*self.fwhm/2.355
+
+        self.fwhmlimup = np.mean(fwhm) + 0.4*np.std(fwhm)
+        self.fwhmlimlow = np.mean(fwhm) - 0.2*np.std(fwhm)
 
         p.figure(figsize=(12,12))
         p.subplot(331)
@@ -259,7 +263,7 @@ class Frame(mylogger):
         p.subplot(335)
         p.xlabel('separation [arcsec]')
         p.hist(nsep.arcsec, bins=30, color='k', alpha=0.6)
-        p.axvline(x=12*self.fwhmph, ls='--', c='k')
+        p.axvline(x=15*self.fwhmph, ls='--', c='k')
         p.subplot(336)
         p.xlabel('sky std [counts]')
         p.hist(skystd, bins=30, color='k', alpha=0.6)
@@ -268,32 +272,36 @@ class Frame(mylogger):
         p.axvline(x=np.median(skystd), ls='-', c='k')
         p.subplot(337)
         p.xlabel('sky [counts]')
-        p.hist(sky, range=[40,90], bins=30, color='k', alpha=0.6)
+        p.hist(sky, bins=30, color='k', alpha=0.6)
         p.axvline(x=np.mean(sky) - np.std(sky), ls='--', c='k')
         p.axvline(x=np.mean(sky) + np.std(sky), ls='--', c='k')
         p.axvline(x=np.mean(sky), ls='-', c='k')
         p.savefig(self.psfselectplot)
 
         ## Set of constrains for PSF stars
-        i = (mag < self.maglim)  # works if zeropoint guess was ok
+        i = (mag < self.maglim)
         i *= (merr < self.merrlim)
         i *= (np.abs(sharp-np.median(sharp)) < self.sharplim)
         i *= (fwhm < self.fwhmlimup)
         i *= (fwhm > self.fwhmlimlow)
-        i *= (nsep.arcsec > 17*self.fwhmph)
+        i *= (nsep2.arcsec > 15*self.fwhmph)
         i *= (x > 60*self.fwhm)*(y > 60*self.fwhm)
         i *= (x < self.hdu.data.shape[1] - 60*self.fwhm)
         i *= (y < self.hdu.data.shape[0] - 60*self.fwhm)
-        i *= (np.abs(skystd - np.median(skystd)) < np.std(skystd))
-        i *= (np.abs(sky - np.mean(sky)) < np.std(sky))
+        #i *= (np.abs(skystd - np.median(skystd)) < np.std(skystd))
+        #i *= (np.abs(sky - np.mean(sky)) < np.std(sky))
 
         if len(id[i]) <= 2:
             self.log(3, 'NPSF', len(id[i]), 'Number of PSF stars less than 2')
         else:
-            self.log(1, 'NPSF', len(id[i]), 'Number of PSF stars is %i' % len(id[i]))
+            self.log(1, 'NPSF', len(id[i]), '%d Number of PSF stars is %i' % (self.ext, len(id[i])))
 
-        self._parse_pst(id[i], x[i], y[i], mag[i], sky[i])
-        return (id[i], x[i], y[i], mag[i], sky[i])
+        fid, fx, fy, fmag, fsky = self.cutbad(id[i], x[i], y[i], mag[i], sky[i])
+        self._parse_pst(fid, fx, fy, fmag, fsky, outfn)
+        return (fid, fx, fy, fmag, fsky), f
+
+#        self._parse_pst(id[i], x[i], y[i], mag[i], sky[i], outfn)
+#        return (id[i], x[i], y[i], mag[i], sky[i]), f
 
     def tvmark(self, ra, dec):
         gc = aplpy.FITSFigure(self.hdu)
@@ -302,8 +310,8 @@ class Frame(mylogger):
         gc.show_markers(ra,dec,layer='scatter',edgecolor='red',
                         facecolor='none',marker='o',s=10,alpha=0.5)
 
-    def _parse_pst(self, id, x, y, mag, msky):
-        pstfile = open(self.pstfile, 'w')
+    def _parse_pst(self, id, x, y, mag, msky, pstfile):
+        pstfile = open(pstfile, 'w')
         pstfile.write("#N ID    XCENTER   YCENTER   MAG         MSKY                                  \\\n")
         pstfile.write("#U ##    pixels    pixels    magnitudes  counts                                \\\n")
         pstfile.write("#F %-9d  %-10.3f   %-10.3f   %-12.3f     %-15.7g                                 \n")
@@ -312,9 +320,51 @@ class Frame(mylogger):
                    fmt=['%-9d','%-10.3f','%-10.3f','%-12.3f','%-15.7g'])
         pstfile.close()
 
-    def grid_psf(self):
+    def cutbad(self, id, x, y, mag, sky):
+        rad = int(6*self.fwhm)
+        ID = []
+        X = []
+        Y = []
+        MAG = []
+        SKY = []
+        for i in np.arange(len(x)):
+            xbox = int(x[i] - rad)
+            Xbox = int(x[i] + rad)
+            ybox = int(y[i] - rad)
+            Ybox = int(y[i] + rad)
+            block = self.hdu.data[ybox:Ybox,xbox:Xbox]
+
+
+            xx = np.arange(block.shape[1])
+            yy = np.arange(block.shape[0])
+            rr = np.sqrt((xx[:, None]-xc)**2 + (yy[None, :]-yc)**2) # None is a trick to increase dimensions of boolean array
+            j = (rr > 3*self.fwhm)
+
+            if np.any(block > self.high):
+                print 'star %d at %d %d eliminated: global high value nearby' % (id[i], x[i], y[i])
+            elif np.any(block < self.sky - 4*self.sigma):
+                print 'star %d at %d %d eliminated: global low value nearby' % (id[i], x[i], y[i])
+            elif np.any(block[j] > self.sky + 3*self.sigma):
+                print 'star %d at %d %d eliminated: contaminating object' % (id[i], x[i], y[i])
+            else:
+                ID.append(id[i])
+                X.append(x[i])
+                Y.append(y[i])
+                MAG.append(mag[i])
+                SKY.append(sky[i])
+        ID = np.array(ID)
+        X = np.array(X)
+        Y = np.array(Y)
+        MAG = np.array(MAG)
+        SKY = np.array(SKY)
+        return (ID, X, Y, MAG, SKY)
+
+
+
+
+    def grid_psf(self, pstfile, gridname):
         from mpl_toolkits.axes_grid1 import ImageGrid
-        id, x, y = np.loadtxt(self.pstfile, usecols=(0,1,2), unpack=True)
+        id, x, y = np.loadtxt(pstfile, usecols=(0,1,2), unpack=True)
         side = int(np.ceil(np.sqrt(len(x))))
         rad = int(6*self.fwhm)
         fig = p.figure(figsize=(12,12))
@@ -340,9 +390,9 @@ class Frame(mylogger):
                            vmin=self.sky-5*self.sigma, vmax=300,
                            interpolation='nearest')
 
-        p.savefig(self.psfgridname)
+        p.savefig(gridname)
 
-    def run_psf(self):
+    def run_psf(self, base, ext, photfn):
         fwhm = self.fwhm
         iraf.daopars.setParam('matchra',fwhm)
         iraf.daopars.setParam('psfrad',4*fwhm+1)
@@ -350,11 +400,18 @@ class Frame(mylogger):
         iraf.daopars.setParam('sannulu',2*fwhm)
         iraf.daopars.setParam('wsannul',4*fwhm)
         iraf.psf.setParam('image',self.iname)
-        iraf.psf(mode='h')
-        iraf.seepsf(psfimage=self.base+self.psf, image=self.base+self.psfimg,
-                    magnitu='18.0')
 
-    def run_allstar(self):
+        iraf.psf.setParam('photfile', photfn)
+        iraf.psf.setParam('pstfile',  '%s.%d.pst.1' % (base, ext))
+        iraf.psf.setParam('psfimage', '%s.%d.psf.1' % (base, ext))
+        iraf.psf.setParam('opstfile', '%s.%d.psj.1' % (base, ext))
+        iraf.psf.setParam('groupfil', '%s.%d.psg.1' % (base, ext))
+
+        iraf.psf(mode='h')
+        iraf.seepsf(psfimage='%s.%d.psf.1.fits'%(base, ext),
+                    image='%s.%d.psf.1.img.fits'%(base, ext), magnitu='18.0')
+
+    def run_allstar(self, base, ext):
         fwhm = self.fwhm
         iraf.daopars.setParam('matchra',fwhm)
         iraf.daopars.setParam('psfrad',4*fwhm+1)
@@ -362,6 +419,13 @@ class Frame(mylogger):
         iraf.daopars.setParam('sannulu',2*fwhm)
         iraf.daopars.setParam('wsannul',4*fwhm)
         iraf.allstar.setParam('image',self.iname)
+
+        iraf.allstar.setParam('photfile', '%s.%d.mag.1' % (base, ext))
+        iraf.allstar.setParam('psfimage', '%s.%d.psf.1' % (base, ext))
+        iraf.allstar.setParam('allstarf', '%s.%d.als.1' % (base, ext))
+        iraf.allstar.setParam('rejfile',  '%s.%d.arj.1' % (base, ext))
+        iraf.allstar.setParam('subimage', '%s.%d.sub.1' % (base, ext))
+
         iraf.allstar(mode='h',verbose='no')
 
 

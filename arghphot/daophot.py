@@ -11,12 +11,12 @@ def set_default(base):
     iraf.reset(min_lenuserarea='200000')
 
     iraf.datapars.setParam('datamin','INDEF')
-    iraf.datapars.setParam('datamax','50000')
+    iraf.datapars.setParam('datamax','60000')
     iraf.datapars.setParam('exposure','EXPTIME')
     iraf.datapars.setParam('airmass', 'AIRMASS')
     iraf.datapars.setParam('filter', 'FILTER')
 
-    iraf.findpars.setParam('threshold',4.0)
+    iraf.findpars.setParam('threshold', 3.0)
     iraf.findpars.setParam('sharphi',  1)
     iraf.findpars.setParam('roundhi', 1.3)
     iraf.findpars.setParam('roundlo', -1.3)
@@ -47,7 +47,7 @@ def set_default(base):
     iraf.daopars.setParam('fitsky','yes')
     iraf.daopars.setParam('recenter','yes')
     iraf.daopars.setParam('groupsk','yes')
-    iraf.daopars.setParam('maxnsta','20000')
+    iraf.daopars.setParam('maxnsta','40000')
 
     iraf.psf.setParam('photfile',base+'default')
     iraf.psf.setParam('pstfile',base+'default')
@@ -59,9 +59,4 @@ def set_default(base):
     iraf.psf.setParam('verify','no')
     iraf.psf.setParam('showplo','no')
 
-    iraf.allstar.setParam('photfile',base+'default')
-    iraf.allstar.setParam('psfimage',base+'default')
-    iraf.allstar.setParam('allstarf',base+'default')
-    iraf.allstar.setParam('rejfile',base+'default')
-    iraf.allstar.setParam('subimage',base+'default')
     iraf.allstar.setParam('verify','no')
