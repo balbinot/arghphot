@@ -143,7 +143,7 @@ class Frame(mylogger):
         iraf.fitskypars.setParam('skyvalue',self.sky)
         iraf.fitskypars.setParam('annulus',4.*self.fwhm)
         iraf.fitskypars.setParam('dannulus',2.*self.fwhm)
-        iraf.photpars.setParam('zmag', self.hdup.header['MAGZERO']) # Use DECAM estimate of zeropoint
+        iraf.photpars.setParam('zmag', self.hdup.header['MAGZPT']) # Use DECAM estimate of zeropoint
         iraf.phot(mode='h',Stdout=1)
 
     def trim_phot(self, photfn, outfn):
@@ -216,7 +216,7 @@ class Frame(mylogger):
 
         return oo
 
-    def select_psf(self, trimphotfn, coofn, fitpsffn, outfn):
+    def select_psf(self, trimphotfn, coofn, fitpsffn, outfn, mlimt=1.2, sepmult=12, checkcom=True):
         f = self.merge(trimphotfn, coofn, fitpsffn)
         w = self.pix2sky(f[:,0], f[:,1])
         coo = SkyCoord(w[:,0]*u.deg, w[:,1]*u.deg)
@@ -231,14 +231,14 @@ class Frame(mylogger):
         sharp = f[:,9]
         fwhm = f[:,13]
 
-        self.maglim = np.mean(mag) - 0.4
-        self.merrlim = 0.1
-        self.sharplim = 0.06
+        self.maglim = np.mean(mag) - mlimt
+        self.merrlim = 0.08
+        self.sharplim = 0.04
         #self.fwhmlimup = 1.15*self.fwhm/2.355
         #self.fwhmlimlow = 0.55*self.fwhm/2.355
 
-        self.fwhmlimup = np.mean(fwhm) + 0.4*np.std(fwhm)
-        self.fwhmlimlow = np.mean(fwhm) - 0.2*np.std(fwhm)
+        self.fwhmlimup = np.mean(fwhm) + 0.2*np.std(fwhm)
+        self.fwhmlimlow = np.mean(fwhm) - np.std(fwhm)
 
         p.figure(figsize=(12,12))
         p.subplot(331)
@@ -262,8 +262,8 @@ class Frame(mylogger):
         p.axvline(x=self.fwhmlimlow, ls='--', c='k')
         p.subplot(335)
         p.xlabel('separation [arcsec]')
-        p.hist(nsep.arcsec, bins=30, color='k', alpha=0.6)
-        p.axvline(x=15*self.fwhmph, ls='--', c='k')
+        p.hist(nsep2.arcsec, bins=30, color='k', alpha=0.6)
+        p.axvline(x=12*self.fwhmph, ls='--', c='k')
         p.subplot(336)
         p.xlabel('sky std [counts]')
         p.hist(skystd, bins=30, color='k', alpha=0.6)
@@ -284,7 +284,7 @@ class Frame(mylogger):
         i *= (np.abs(sharp-np.median(sharp)) < self.sharplim)
         i *= (fwhm < self.fwhmlimup)
         i *= (fwhm > self.fwhmlimlow)
-        i *= (nsep2.arcsec > 15*self.fwhmph)
+        i *= (nsep2.arcsec > sepmult*self.fwhmph)
         i *= (x > 60*self.fwhm)*(y > 60*self.fwhm)
         i *= (x < self.hdu.data.shape[1] - 60*self.fwhm)
         i *= (y < self.hdu.data.shape[0] - 60*self.fwhm)
@@ -296,7 +296,7 @@ class Frame(mylogger):
         else:
             self.log(1, 'NPSF', len(id[i]), '%d Number of PSF stars is %i' % (self.ext, len(id[i])))
 
-        fid, fx, fy, fmag, fsky = self.cutbad(id[i], x[i], y[i], mag[i], sky[i])
+        fid, fx, fy, fmag, fsky = self.cutbad(id[i], x[i], y[i], mag[i], sky[i], checkcom)
         self._parse_pst(fid, fx, fy, fmag, fsky, outfn)
         return (fid, fx, fy, fmag, fsky), f
 
@@ -320,7 +320,7 @@ class Frame(mylogger):
                    fmt=['%-9d','%-10.3f','%-10.3f','%-12.3f','%-15.7g'])
         pstfile.close()
 
-    def cutbad(self, id, x, y, mag, sky):
+    def cutbad(self, id, x, y, mag, sky, checkcom=True):
         rad = int(6*self.fwhm)
         ID = []
         X = []
@@ -334,17 +334,18 @@ class Frame(mylogger):
             Ybox = int(y[i] + rad)
             block = self.hdu.data[ybox:Ybox,xbox:Xbox]
 
-
             xx = np.arange(block.shape[1])
             yy = np.arange(block.shape[0])
+            xc = block.shape[1]/2.
+            yc = block.shape[0]/2.
             rr = np.sqrt((xx[:, None]-xc)**2 + (yy[None, :]-yc)**2) # None is a trick to increase dimensions of boolean array
             j = (rr > 3*self.fwhm)
 
             if np.any(block > self.high):
                 print 'star %d at %d %d eliminated: global high value nearby' % (id[i], x[i], y[i])
-            elif np.any(block < self.sky - 4*self.sigma):
+            elif np.any(block < self.sky - 6*self.sigma):
                 print 'star %d at %d %d eliminated: global low value nearby' % (id[i], x[i], y[i])
-            elif np.any(block[j] > self.sky + 3*self.sigma):
+            elif np.any(block[j] > self.sky + 5*self.sigma) & checkcom==True:
                 print 'star %d at %d %d eliminated: contaminating object' % (id[i], x[i], y[i])
             else:
                 ID.append(id[i])
@@ -358,8 +359,6 @@ class Frame(mylogger):
         MAG = np.array(MAG)
         SKY = np.array(SKY)
         return (ID, X, Y, MAG, SKY)
-
-
 
 
     def grid_psf(self, pstfile, gridname):
